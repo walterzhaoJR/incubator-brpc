@@ -615,6 +615,14 @@ inline void release_tls_block(IOBuf::Block* b) {
         b->dec_ref();
         // g_num_hit_tls_threshold.fetch_add(1, butil::memory_order_relaxed);
         inc_g_num_hit_tls_threshold();
+    } else if (b == tls_data->block_head) {
+        // b is already at the head of the TLS free list.  Re-inserting it
+        // would execute `b->portal_next = block_head`, i.e. `b->portal_next = b`,
+        // creating a single-node self-loop.  Any later traversal of the TLS
+        // chain (remove_tls_block_chain at thread exit, share_tls_block, etc.)
+        // would spin forever.  Skip the duplicate return.
+        // See https://github.com/apache/brpc/issues/3243
+        return;
     } else {
         b->u.portal_next = tls_data->block_head;
         tls_data->block_head = b;

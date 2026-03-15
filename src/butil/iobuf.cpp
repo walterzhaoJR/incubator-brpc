@@ -334,18 +334,32 @@ void release_tls_block_chain(IOBuf::Block* b) {
         g_num_hit_tls_threshold.fetch_add(n, butil::memory_order_relaxed);
         return;
     }
+    IOBuf::Block* const old_head = tls_data.block_head;
     IOBuf::Block* first_b = b;
     IOBuf::Block* last_b = NULL;
     do {
         ++n;
         CHECK(!b->full());
+        // If any block in the incoming chain is already the TLS block_head,
+        // linking last_b->portal_next = block_head would create a cycle:
+        //   - Single-block chain [B] where B == block_head:
+        //     last_b->portal_next = B, i.e. B->portal_next = B (self-loop)
+        //   - Multi-block chain [A -> B] where A == block_head:
+        //     last_b(B)->portal_next = A, creating A -> B -> A (cycle)
+        // Return early before any state is modified so that num_blocks stays
+        // consistent with the actual list length (remove_tls_block_chain
+        // verifies this with CHECK_EQ at thread exit).
+        // See https://github.com/apache/brpc/issues/3243
+        if (b == old_head) {
+            return;
+        }
         if (b->u.portal_next == NULL) {
             last_b = b;
             break;
         }
         b = b->u.portal_next;
     } while (true);
-    last_b->u.portal_next = tls_data.block_head;
+    last_b->u.portal_next = old_head;
     tls_data.block_head = first_b;
     tls_data.num_blocks += n;
     if (!tls_data.registered) {
