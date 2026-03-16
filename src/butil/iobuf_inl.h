@@ -603,26 +603,34 @@ void remove_tls_block_chain();
 
 IOBuf::Block* acquire_tls_block();
 
+inline bool is_in_tls_block_chain(IOBuf::Block* head, IOBuf::Block* b) {
+    for (IOBuf::Block* p = head; p != NULL; p = p->u.portal_next) {
+        if (p == b) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Return one block to TLS.
 inline void release_tls_block(IOBuf::Block* b) {
     if (!b) {
         return;
     }
     TLSData *tls_data = get_g_tls_data();
+    // Guard against duplicate return anywhere in the TLS list.  Checking only
+    // block_head misses cases like H -> X where returning X again would create
+    // a 2-node cycle X -> H -> X.  The TLS list is short (soft-limited), so a
+    // linear scan is cheap here.
+    if (is_in_tls_block_chain(tls_data->block_head, b)) {
+        return;
+    }
     if (b->full()) {
         b->dec_ref();
     } else if (tls_data->num_blocks >= max_blocks_per_thread()) {
         b->dec_ref();
         // g_num_hit_tls_threshold.fetch_add(1, butil::memory_order_relaxed);
         inc_g_num_hit_tls_threshold();
-    } else if (b == tls_data->block_head) {
-        // b is already at the head of the TLS free list.  Re-inserting it
-        // would execute `b->portal_next = block_head`, i.e. `b->portal_next = b`,
-        // creating a single-node self-loop.  Any later traversal of the TLS
-        // chain (remove_tls_block_chain at thread exit, share_tls_block, etc.)
-        // would spin forever.  Skip the duplicate return.
-        // See https://github.com/apache/brpc/issues/3243
-        return;
     } else {
         b->u.portal_next = tls_data->block_head;
         tls_data->block_head = b;

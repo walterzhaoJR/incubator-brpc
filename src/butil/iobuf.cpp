@@ -324,33 +324,32 @@ IOBuf::Block* share_tls_block() {
 void release_tls_block_chain(IOBuf::Block* b) {
     TLSData& tls_data = g_tls_data;
     size_t n = 0;
+    size_t n_hit_threshold = 0;
     if (tls_data.num_blocks >= max_blocks_per_thread()) {
         do {
             ++n;
             IOBuf::Block* const saved_next = b->u.portal_next;
-            b->dec_ref();
+            // If b is already cached in TLS, dec_ref() would drop a reference
+            // still owned by the TLS list and leave a dangling pointer behind.
+            if (!is_in_tls_block_chain(tls_data.block_head, b)) {
+                b->dec_ref();
+                ++n_hit_threshold;
+            }
             b = saved_next;
         } while (b);
-        g_num_hit_tls_threshold.fetch_add(n, butil::memory_order_relaxed);
+        g_num_hit_tls_threshold.fetch_add(
+            n_hit_threshold, butil::memory_order_relaxed);
         return;
     }
-    IOBuf::Block* const old_head = tls_data.block_head;
     IOBuf::Block* first_b = b;
     IOBuf::Block* last_b = NULL;
     do {
         ++n;
         CHECK(!b->full());
-        // If any block in the incoming chain is already the TLS block_head,
-        // linking last_b->portal_next = block_head would create a cycle:
-        //   - Single-block chain [B] where B == block_head:
-        //     last_b->portal_next = B, i.e. B->portal_next = B (self-loop)
-        //   - Multi-block chain [A -> B] where A == block_head:
-        //     last_b(B)->portal_next = A, creating A -> B -> A (cycle)
-        // Return early before any state is modified so that num_blocks stays
-        // consistent with the actual list length (remove_tls_block_chain
-        // verifies this with CHECK_EQ at thread exit).
-        // See https://github.com/apache/brpc/issues/3243
-        if (b == old_head) {
+        // Guard against overlap with any node already cached in TLS, not just
+        // block_head.  Otherwise returning X into H -> X would create a
+        // 2-node cycle X -> H -> X and hang later list traversal.
+        if (is_in_tls_block_chain(tls_data.block_head, b)) {
             return;
         }
         if (b->u.portal_next == NULL) {
@@ -359,7 +358,7 @@ void release_tls_block_chain(IOBuf::Block* b) {
         }
         b = b->u.portal_next;
     } while (true);
-    last_b->u.portal_next = old_head;
+    last_b->u.portal_next = tls_data.block_head;
     tls_data.block_head = first_b;
     tls_data.num_blocks += n;
     if (!tls_data.registered) {
