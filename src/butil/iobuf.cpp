@@ -323,11 +323,9 @@ IOBuf::Block* share_tls_block() {
 // NOTE: b MUST be non-NULL and all blocks linked SHOULD not be full.
 void release_tls_block_chain(IOBuf::Block* b) {
     TLSData& tls_data = g_tls_data;
-    size_t n = 0;
     size_t n_hit_threshold = 0;
     if (tls_data.num_blocks >= max_blocks_per_thread()) {
         do {
-            ++n;
             IOBuf::Block* const saved_next = b->u.portal_next;
             // If b is already cached in TLS, dec_ref() would drop a reference
             // still owned by the TLS list and leave a dangling pointer behind.
@@ -343,24 +341,29 @@ void release_tls_block_chain(IOBuf::Block* b) {
     }
     IOBuf::Block* first_b = b;
     IOBuf::Block* last_b = NULL;
+    size_t n_to_tls = 0;
     do {
-        ++n;
         CHECK(!b->full());
         // Guard against overlap with any node already cached in TLS, not just
-        // block_head.  Otherwise returning X into H -> X would create a
-        // 2-node cycle X -> H -> X and hang later list traversal.
+        // block_head.  Returning X into H -> X would create a 2-node cycle
+        // X -> H -> X.  If the overlap happens after a unique prefix such as
+        // A -> X, keep the prefix by linking A directly to the old TLS head.
         if (is_in_tls_block_chain(tls_data.block_head, b)) {
-            return;
+            break;
         }
+        ++n_to_tls;
+        last_b = b;
         if (b->u.portal_next == NULL) {
-            last_b = b;
             break;
         }
         b = b->u.portal_next;
     } while (true);
+    if (last_b == NULL) {
+        return;
+    }
     last_b->u.portal_next = tls_data.block_head;
     tls_data.block_head = first_b;
-    tls_data.num_blocks += n;
+    tls_data.num_blocks += n_to_tls;
     if (!tls_data.registered) {
         tls_data.registered = true;
         butil::thread_atexit(remove_tls_block_chain);

@@ -2149,6 +2149,64 @@ TEST_F(IOBufTest, regression_3243_release_tls_block_chain_non_head_no_cycle) {
            "(GitHub issue #3243)";
 }
 
+struct PartialOverlapResult {
+    bool has_cycle;
+    int tls_block_count;
+};
+
+static void* partial_overlap_release_tls_block_chain_thread(void* arg) {
+    PartialOverlapResult* result = static_cast<PartialOverlapResult*>(arg);
+    result->has_cycle = false;
+    result->tls_block_count = -1;
+    butil::iobuf::remove_tls_block_chain();
+
+    butil::IOBuf::Block* tail = butil::iobuf::acquire_tls_block();
+    butil::IOBuf::Block* head = butil::iobuf::acquire_tls_block();
+    butil::IOBuf::Block* prefix = butil::iobuf::acquire_tls_block();
+    if (!tail || !head || !prefix) {
+        dec_ref_distinct_blocks(tail, head, prefix);
+        return NULL;
+    }
+
+    butil::iobuf::release_tls_block(tail);
+    butil::iobuf::release_tls_block(head);
+    // TLS: head -> tail -> NULL. Returning prefix -> tail should preserve
+    // prefix and avoid both the tail->head->tail cycle and leaking prefix.
+    prefix->u.portal_next = tail;
+    butil::iobuf::release_tls_block_chain(prefix);
+
+    result->has_cycle = tls_block_chain_has_cycle();
+    result->tls_block_count = butil::iobuf::get_tls_block_count();
+    if (result->has_cycle) {
+        cleanup_corrupted_tls_chain(3);
+    } else {
+        butil::iobuf::remove_tls_block_chain();
+    }
+    return NULL;
+}
+
+TEST_F(IOBufTest, regression_3243_release_tls_block_chain_partial_overlap_keeps_prefix) {
+    install_debug_allocator();
+
+    PartialOverlapResult result;
+    result.has_cycle = false;
+    result.tls_block_count = -1;
+
+    pthread_t tid;
+    ASSERT_EQ(0, pthread_create(&tid, NULL,
+                                partial_overlap_release_tls_block_chain_thread,
+                                &result));
+    ASSERT_EQ(0, pthread_join(tid, NULL));
+
+    EXPECT_FALSE(result.has_cycle)
+        << "release_tls_block_chain() created a cycle when a unique prefix "
+           "was returned ahead of a block already cached in TLS.  "
+           "(GitHub issue #3243)";
+    EXPECT_EQ(3, result.tls_block_count)
+        << "release_tls_block_chain() dropped the unique prefix when the "
+           "returned chain overlapped the TLS list.  (GitHub issue #3243)";
+}
+
 // Reproduce the issue through IOBufAsZeroCopyOutputStream::BackUp().  BackUp()
 // eagerly returns _cur_block to TLS.  A subsequent release of the same pointer
 // used to create a self-loop at the head.
