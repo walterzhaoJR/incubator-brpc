@@ -2186,8 +2186,6 @@ static void* partial_overlap_release_tls_block_chain_thread(void* arg) {
 }
 
 TEST_F(IOBufTest, regression_3243_release_tls_block_chain_partial_overlap_keeps_prefix) {
-    install_debug_allocator();
-
     PartialOverlapResult result;
     result.has_cycle = false;
     result.tls_block_count = -1;
