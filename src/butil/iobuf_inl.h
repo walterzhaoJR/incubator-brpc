@@ -603,7 +603,7 @@ void remove_tls_block_chain();
 
 IOBuf::Block* acquire_tls_block();
 
-inline bool is_in_tls_block_chain(IOBuf::Block* head, IOBuf::Block* b) {
+static inline bool is_in_tls_block_chain(IOBuf::Block* head, IOBuf::Block* b) {
     for (IOBuf::Block* p = head; p != NULL; p = p->u.portal_next) {
         if (p == b) {
             return true;
